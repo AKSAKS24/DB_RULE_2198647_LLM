@@ -4,10 +4,6 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 import os, re, json
 
-from dotenv import load_dotenv
-dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
-load_dotenv(dotenv_path=dotenv_path)
-
 # ---- LLM Setup ----
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
