@@ -1,30 +1,27 @@
-# app_2198647_strict.py
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional
-import os, re, json
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+import os, json, re
 
-# ---- LLM Setup ----
+# --- LLM required env ---
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY environment variable is required.")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+    raise RuntimeError("Need OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano")
 
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
-app = FastAPI(title="SAP Note 2198647 Assessment - Strict Schema")
+app = FastAPI(title="SAP Note 2198647 Assessment - System-Style Strict (Findings)")
 
-# ===== Tables & Fields impacted by Note 2198647 =====
+# --- Patterns and obsolete rules ---
 OBSOLETE_TABLES = {"VBUK": "VBAK", "VBUP": "VBAP"}
-SQL_OBSOLETE_FIELDS = {"VBTYP_EXT"}      # only checked in SQL
-DECL_LENGTHENED = {"VBTYP": "VBTYPL"}    # checked in declarations
-DECL_OBSOLETE = {"VBTYP_EXT"}            # obsolete declarations
+DECL_LENGTHENED = {"VBTYP": "VBTYPL"}
+DECL_OBSOLETE = {"VBTYP_EXT"}
 
-# ===== Regex patterns =====
 SQL_SELECT_BLOCK_RE = re.compile(
     r"\bSELECT\b(?P<select>.+?)\bFROM\b\s+(?P<table>\w+)(?P<rest>.*?)(?=(\bSELECT\b|$))",
     re.IGNORECASE | re.DOTALL,
@@ -34,201 +31,200 @@ DECLARATION_RE = re.compile(
     r"\b(?:TYPE|LIKE)\b\s+(?P<field>[A-Z0-9_]+)", re.IGNORECASE
 )
 
-# ===== Strict Models =====
-class SelectItem(BaseModel):
-    table: str
-    target_type: str
-    target_name: str
-    used_fields: List[str]
-    suggested_fields: List[str]
-    suggested_statement: str
-
-    @field_validator("used_fields", "suggested_fields")
-    @classmethod
-    def filter_none(cls, v: List[str]) -> List[str]:
-        return [x for x in v if x is not None]
+# --- Data Models (system-style full, using findings as field name) ---
+class Finding(BaseModel):
+    pgm_name: Optional[str] = None
+    inc_name: Optional[str] = None
+    type: Optional[str] = None
+    name: Optional[str] = None
+    class_implementation: Optional[str] = None
+    issue_type: Optional[str] = None
+    severity: Optional[str] = None
+    message: Optional[str] = None
+    suggestion: Optional[str] = None
+    snippet: Optional[str] = None
 
 class Unit(BaseModel):
     pgm_name: str
     inc_name: str
     type: str
-    name: str
+    name: Optional[str] = ""
+    class_implementation: Optional[str] = ""
+    start_line: Optional[int] = 0
+    end_line: Optional[int] = 0
     code: Optional[str] = ""
-    selects: List[SelectItem] = Field(default_factory=list)
+    findings: Optional[List[Finding]] = Field(default_factory=list)
 
-# ===== Detection logic =====
-def comment_table(tbl: str) -> str:
-    return f"* TODO: Table {tbl} obsolete in S/4HANA (SAP Note 2198647). Replace with {OBSOLETE_TABLES[tbl]}."
-
-def comment_decl_field(f: str) -> str:
-    if f in DECL_OBSOLETE:
-        return f"* TODO: Field {f} obsolete (2198647). Remove usage."
-    if f in DECL_LENGTHENED:
-        return f"* TODO: Data element {f} lengthened (2198647). Use {DECL_LENGTHENED[f]}."
-    return ""
-
-def comment_sql_field(f: str) -> str:
-    return f"* TODO: Field {f} obsolete in S/4HANA (2198647). Remove usage."
-
-def parse_and_build_selectitems(code: str) -> List[SelectItem]:
-    results: List[SelectItem] = []
-
+# --- Detection Logic: fills all system model fields as possible ---
+def build_findings(unit: Unit) -> List[Finding]:
+    code = unit.code or ""
+    findings = []
     for stmt in SQL_SELECT_BLOCK_RE.finditer(code):
         table = stmt.group("table").upper()
         rest_text = stmt.group("rest")
-
-        # FROM
+        full_stmt = stmt.group(0).strip()
         if table in OBSOLETE_TABLES:
-            results.append(
-                SelectItem(
-                    table=table,
-                    target_type="TABLE",
-                    target_name=table,
-                    used_fields=[table],
-                    suggested_fields=[OBSOLETE_TABLES[table]],
-                    suggested_statement=comment_table(table)
-                )
-            )
-
-        # JOIN
+            findings.append(Finding(
+                pgm_name=unit.pgm_name,
+                inc_name=unit.inc_name,
+                type=unit.type,
+                name=unit.name,
+                class_implementation=unit.class_implementation,
+                issue_type="Obsolete Table",
+                severity="HIGH",
+                message=f"Table {table} is obsolete in S/4HANA.",
+                suggestion=f"Replace {table} with {OBSOLETE_TABLES[table]} as per SAP Note 2198647.",
+                snippet=full_stmt
+            ))
         for jm in JOIN_RE.finditer(rest_text):
             jtable = jm.group("table").upper()
             if jtable in OBSOLETE_TABLES:
-                results.append(
-                    SelectItem(
-                        table=jtable,
-                        target_type="TABLE",
-                        target_name=jtable,
-                        used_fields=[jtable],
-                        suggested_fields=[OBSOLETE_TABLES[jtable]],
-                        suggested_statement=comment_table(jtable)
-                    )
-                )
-
-        # SQL fields
-        if "VBTYP_EXT" in stmt.group(0).upper():
-            results.append(
-                SelectItem(
-                    table="",
-                    target_type="SQL_FIELD",
-                    target_name="VBTYP_EXT",
-                    used_fields=["VBTYP_EXT"],
-                    suggested_fields=[],
-                    suggested_statement=comment_sql_field("VBTYP_EXT")
-                )
-            )
-
-    # Declaration scanning
+                findings.append(Finding(
+                    pgm_name=unit.pgm_name,
+                    inc_name=unit.inc_name,
+                    type=unit.type,
+                    name=unit.name,
+                    class_implementation=unit.class_implementation,
+                    issue_type="Obsolete Table (JOIN)",
+                    severity="HIGH",
+                    message=f"Join on table {jtable} is obsolete in S/4HANA.",
+                    suggestion=f"Replace {jtable} with {OBSOLETE_TABLES[jtable]} as per SAP Note 2198647.",
+                    snippet=jm.group(0).strip()
+                ))
+        if "VBTYP_EXT" in full_stmt.upper():
+            findings.append(Finding(
+                pgm_name=unit.pgm_name,
+                inc_name=unit.inc_name,
+                type=unit.type,
+                name=unit.name,
+                class_implementation=unit.class_implementation,
+                issue_type="Obsolete Field",
+                severity="HIGH",
+                message="Obsolete field VBTYP_EXT is used.",
+                suggestion="Remove usage of field VBTYP_EXT as per SAP Note 2198647.",
+                snippet=full_stmt
+            ))
     for m in DECLARATION_RE.finditer(code):
         fld = m.group("field").upper()
-        if fld in DECL_OBSOLETE or fld in DECL_LENGTHENED:
-            results.append(
-                SelectItem(
-                    table="",
-                    target_type="DECLARATION",
-                    target_name=fld,
-                    used_fields=[fld],
-                    suggested_fields=([DECL_LENGTHENED[fld]] if fld in DECL_LENGTHENED else []),
-                    suggested_statement=comment_decl_field(fld)
-                )
-            )
+        line_text = m.group(0).strip()
+        if fld in DECL_OBSOLETE:
+            findings.append(Finding(
+                pgm_name=unit.pgm_name,
+                inc_name=unit.inc_name,
+                type=unit.type,
+                name=unit.name,
+                class_implementation=unit.class_implementation,
+                issue_type="Obsolete Declaration",
+                severity="MEDIUM",
+                message=f"Obsolete data element: {fld}.",
+                suggestion=f"Remove usage of obsolete field {fld} as per SAP Note 2198647.",
+                snippet=line_text
+            ))
+        if fld in DECL_LENGTHENED:
+            findings.append(Finding(
+                pgm_name=unit.pgm_name,
+                inc_name=unit.inc_name,
+                type=unit.type,
+                name=unit.name,
+                class_implementation=unit.class_implementation,
+                issue_type="Lengthened Declaration",
+                severity="MEDIUM",
+                message=f"Data element {fld} lengthened.",
+                suggestion=f"Use {DECL_LENGTHENED[fld]} for compatibility as per SAP Note 2198647.",
+                snippet=line_text
+            ))
+    return findings
 
-    return results
+# --- LLM Prompt ---
+SYSTEM_MSG = """
+You are a senior ABAP expert. Output ONLY JSON as response.
+For every provided payload .findings[].snippet,
+write a bullet point that:
+- Displays the exact offending code
+- Explains the necessary action to fix the error using the provided .suggestion text (if available).
+- Bullet points should contain both offending code snippet and the fix (no numbering or referencing like "snippet[1]": display the code inline).
+- Do NOT omit any snippet; all must be covered, no matter how many there are.
+- Only show actual ABAP code for each snippet with its specific action.
+""".strip()
 
-# ===== Summariser =====
-def summarize_selects(unit: Unit) -> Dict[str, Any]:
-    field_count: Dict[str, int] = {}
-    flagged = []
-    for s in unit.selects:
-        for f in s.used_fields:
-            field_count[f.upper()] = field_count.get(f.upper(), 0) + 1
-            flagged.append({"field": f, "reason": s.suggested_statement})
-    return {
-        "program": unit.pgm_name,
-        "include": unit.inc_name,
-        "unit_type": unit.type,
-        "unit_name": unit.name,
-        "stats": {
-            "total_occurrences": len(unit.selects),
-            "fields_frequency": field_count,
-            "note_2198647_flags": flagged
-        }
-    }
-
-# ===== LLM prompt =====
-SYSTEM_MSG = "You are a precise ABAP reviewer familiar with SAP Note 2198647. Output strict JSON only."
 USER_TEMPLATE = """
-You are assessing ABAP code usage in light of SAP Note 2198647 (obsolete VBUK/VBUP tables, fields VBTYP and VBTYP_EXT).
-
-We provide metadata and findings (under "selects"). 
-Tasks:
-1) Produce a concise assessment of impact.
-2) Produce an actionable LLM remediation prompt to insert TODO comments.
-
-Return ONLY strict JSON:
-{{
-  "assessment": "<concise 2198647 impact>",
-  "llm_prompt": "<remediation prompt>"
-}}
-
 Unit metadata:
-- Program: {pgm}
-- Include: {inc}
-- Unit type: {utype}
-- Unit name: {uname}
+Program: {pgm_name}
+Include: {inc_name}
+Unit type: {unit_type}
+Unit name: {unit_name}
+Class implementation: {class_implementation}
+Start line: {start_line}
+End line: {end_line}
 
-Summary:
-{plan_json}
+ABAP code context (optional):
+{code}
 
-Selects (JSON findings):
-{selects_json}
+findings (JSON list of findings, each with all fields above, for 2198647 errors):
+{findings_json}
+
+Instructions:
+1. Write a 1-paragraph assessment summarizing 2198647 risks, in human language.
+2. Write a llm_prompt field: for every finding, add a bullet point with
+   - The exact code (snippet field)
+   - The action required for correction (taken from suggestion field).
+   - Do not compress, omit, or refer to them by index; always display code inline.
+
+Return valid JSON with:
+{{
+  "assessment": "<paragraph>",
+  "llm_prompt": "<action bullets>"
+}}
 """.strip()
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", SYSTEM_MSG),
     ("user", USER_TEMPLATE)
 ])
-llm = ChatOpenAI(model=OPENAI_MODEL)
+llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.0)
 parser = JsonOutputParser()
 chain = prompt | llm | parser
 
 def llm_assess_and_prompt(unit: Unit) -> Dict[str, str]:
-    plan_json = json.dumps(summarize_selects(unit), indent=2)
-    selects_json = json.dumps([s.model_dump() for s in unit.selects], indent=2)
+    findings_json = json.dumps([f.model_dump() for f in (unit.findings or [])], ensure_ascii=False, indent=2)
     try:
         return chain.invoke({
-            "pgm": unit.pgm_name,
-            "inc": unit.inc_name,
-            "utype": unit.type,
-            "uname": unit.name,
-            "plan_json": plan_json,
-            "selects_json": selects_json
+            "pgm_name": unit.pgm_name,
+            "inc_name": unit.inc_name,
+            "unit_type": unit.type,
+            "unit_name": unit.name or "",
+            "class_implementation": unit.class_implementation or "",
+            "start_line": unit.start_line or 0,
+            "end_line": unit.end_line or 0,
+            "code": unit.code or "",
+            "findings_json": findings_json,
         })
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"LLM failed: {e}")
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
 
-# ===== API Endpoint =====
 @app.post("/assess-2198647")
 async def assess_note_2198647(units: List[Unit]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for u in units:
-        if u.code:
-            u.selects = parse_and_build_selectitems(u.code)
-        if not u.selects:
-            # no impacted usage
-            obj = u.model_dump()
-            obj.pop("selects", None)
-            obj["assessment"] = "No usage of obsolete tables/fields from SAP Note 2198647."
-            obj["llm_prompt"] = ""
-            out.append(obj)
+        u.findings = build_findings(u)
+        if not u.findings:
             continue
-
         llm_out = llm_assess_and_prompt(u)
-        obj = u.model_dump()
-        obj.pop("selects", None)
-        obj.pop("code", None)
-        obj["assessment"] = llm_out.get("assessment", "")
-        obj["llm_prompt"] = llm_out.get("llm_prompt", "")
+        # Always make llm_prompt a string
+        prompt_out = llm_out.get("llm_prompt", "")
+        if isinstance(prompt_out, list):
+            prompt_out = "\n".join(str(x) for x in prompt_out if x is not None)
+        obj = {
+            "pgm_name": u.pgm_name,
+            "inc_name": u.inc_name,
+            "type": u.type,
+            "name": u.name,
+            "class_implementation": u.class_implementation,
+            "start_line": u.start_line,
+            "end_line": u.end_line,
+            "assessment": llm_out.get("assessment", ""),
+            "llm_prompt": prompt_out
+        }
         out.append(obj)
     return out
 
