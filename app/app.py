@@ -51,11 +51,11 @@ For every provided payload .findings[], write a bullet point that:
 - If a finding does not have a suggestion, skip it.
 - Each bullet must use the finding's own suggestion.
 - Do NOT omit any finding with a suggestion; all must be covered.
-Return only JSON in this structure:
-{
-  "assessment": "<summary>",
-  "llm_prompt": "<action bullets as text, each on a new line (with or without snippet as explained above)>"
-}
+Return valid JSON with:
+{{
+  "assessment": "...",
+  "llm_prompt": "..."
+}}
 """.strip()
 
 USER_TEMPLATE = """
