@@ -77,11 +77,11 @@ Instructions:
    - The action from the suggestion field
    - If the snippet field is present and not empty, include it alongside the action (before or after, as fits)
    - Leave out any finding with no suggestion.
-Return valid JSON with:
-{
-  "assessment": "...",
-  "llm_prompt": "..."
-}
+Return ONLY strict JSON:
+{{
+  "assessment": "<concise note 2267246 impact>",
+  "llm_prompt": "<prompt for LLM code fixer>"
+}}
 """.strip()
 
 prompt = ChatPromptTemplate.from_messages([
